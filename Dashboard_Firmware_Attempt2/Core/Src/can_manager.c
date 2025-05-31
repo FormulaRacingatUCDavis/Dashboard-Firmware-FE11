@@ -380,5 +380,5 @@ void can_clear_MC_fault(CAN_HandleTypeDef *hcan) {
 }
 
 void can_tx_override_cooling_request(CAN_HandleTypeDef *hcan, uint8_t data) {
-	CAN_Send(hcan, 0xA51, data, 1);
+	CAN_Send(hcan, 0x505, data, 1);
 }
