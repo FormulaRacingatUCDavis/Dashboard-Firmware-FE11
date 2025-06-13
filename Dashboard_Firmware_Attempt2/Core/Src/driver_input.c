@@ -80,7 +80,7 @@ void on_button_enabled(button_id_t enabled_id) {
 				} else { // else, start overriding
 					is_overriding_cooling = 1;
 				}
-				can_tx_override_cooling_request(&hcan2, is_overriding_cooling);
+//				can_tx_override_cooling_request(&hcan2, is_overriding_cooling);
 			}
 
 			break;

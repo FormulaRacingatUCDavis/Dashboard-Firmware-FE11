@@ -31,6 +31,14 @@
 #define BRAKE_BSPD_THRESHOLD 30
 
 #define MAX_TORQUE_NM 230  //230 Nm
-#define MAX_POWER_W 66000   // rules is 80, leave some gap
+
+// See EV.3.3.1 of FSAE Rules 2025
+// Max power draw from accumulator must not exceed 80kW
+// max power draw from accumulator, p_acc = 80kW
+// drivetrain efficiency, n_drv = 0.9 (90%)
+// max power draw from motor, p_motor = p_acc * n_drv = 80kW * 0.9 = 72kW
+// leave some gap, use a number lower than 72kW
+#define MAX_POWER_MOTOR_W 66000
+#define MAX_POWER_ACCUMULATOR_W 79000
 
 #endif

@@ -79,8 +79,6 @@ UART_HandleTypeDef huart7;
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_uart4_rx;
 
-SRAM_HandleTypeDef hsram1;
-
 /* Definitions for DashboardMain */
 osThreadId_t DashboardMainHandle;
 const osThreadAttr_t DashboardMain_attributes = {
@@ -115,7 +113,6 @@ static void MX_ADC3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_UART4_Init(void);
 static void MX_UART7_Init(void);
-static void MX_FMC_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM7_Init(void);
@@ -192,7 +189,6 @@ int main(void)
   MX_TIM4_Init();
   MX_UART4_Init();
   MX_UART7_Init();
-  MX_FMC_Init();
   MX_CAN1_Init();
   MX_USART3_UART_Init();
   MX_TIM7_Init();
@@ -838,60 +834,6 @@ static void MX_DMA_Init(void)
 
 }
 
-/* FMC initialization function */
-static void MX_FMC_Init(void)
-{
-
-  /* USER CODE BEGIN FMC_Init 0 */
-
-  /* USER CODE END FMC_Init 0 */
-
-  FMC_NORSRAM_TimingTypeDef Timing = {0};
-
-  /* USER CODE BEGIN FMC_Init 1 */
-
-  /* USER CODE END FMC_Init 1 */
-
-  /** Perform the SRAM1 memory initialization sequence
-  */
-  hsram1.Instance = FMC_NORSRAM_DEVICE;
-  hsram1.Extended = FMC_NORSRAM_EXTENDED_DEVICE;
-  /* hsram1.Init */
-  hsram1.Init.NSBank = FMC_NORSRAM_BANK1;
-  hsram1.Init.DataAddressMux = FMC_DATA_ADDRESS_MUX_DISABLE;
-  hsram1.Init.MemoryType = FMC_MEMORY_TYPE_SRAM;
-  hsram1.Init.MemoryDataWidth = FMC_NORSRAM_MEM_BUS_WIDTH_16;
-  hsram1.Init.BurstAccessMode = FMC_BURST_ACCESS_MODE_DISABLE;
-  hsram1.Init.WaitSignalPolarity = FMC_WAIT_SIGNAL_POLARITY_LOW;
-  hsram1.Init.WaitSignalActive = FMC_WAIT_TIMING_BEFORE_WS;
-  hsram1.Init.WriteOperation = FMC_WRITE_OPERATION_ENABLE;
-  hsram1.Init.WaitSignal = FMC_WAIT_SIGNAL_DISABLE;
-  hsram1.Init.ExtendedMode = FMC_EXTENDED_MODE_DISABLE;
-  hsram1.Init.AsynchronousWait = FMC_ASYNCHRONOUS_WAIT_DISABLE;
-  hsram1.Init.WriteBurst = FMC_WRITE_BURST_DISABLE;
-  hsram1.Init.ContinuousClock = FMC_CONTINUOUS_CLOCK_SYNC_ONLY;
-  hsram1.Init.WriteFifo = FMC_WRITE_FIFO_ENABLE;
-  hsram1.Init.PageSize = FMC_PAGE_SIZE_NONE;
-  /* Timing */
-  Timing.AddressSetupTime = 15;
-  Timing.AddressHoldTime = 15;
-  Timing.DataSetupTime = 255;
-  Timing.BusTurnAroundDuration = 15;
-  Timing.CLKDivision = 16;
-  Timing.DataLatency = 17;
-  Timing.AccessMode = FMC_ACCESS_MODE_A;
-  /* ExtTiming */
-
-  if (HAL_SRAM_Init(&hsram1, &Timing, NULL) != HAL_OK)
-  {
-    Error_Handler( );
-  }
-
-  /* USER CODE BEGIN FMC_Init 2 */
-
-  /* USER CODE END FMC_Init 2 */
-}
-
 /**
   * @brief GPIO Initialization Function
   * @param None
@@ -908,10 +850,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(HEARTBEAT_GPIO_Port, HEARTBEAT_Pin, GPIO_PIN_RESET);
@@ -992,6 +934,7 @@ void MainEntry(void *argument)
 
 	//WheelSpeedPW_Init(&front_right_wheel_speed_t, &htim1, TIM_CHANNEL_1);
 	WheelSpeed_Init(&front_left_wheel_speed_t, &htim4);
+
   /* Infinite loop */
   for(;;)
   {
@@ -1042,8 +985,8 @@ void MainEntry(void *argument)
 
 	// strain gauge
 	//sg_adc = get_adc_conversion(&hadc1, STRAIN_GAUGE);
-//	telem_id = 2;
-	//can_tx_sg(&hcan1, sg_adc);
+	telem_id = 2;
+	can_tx_sg(&hcan1, sg_adc);
 
 	//sprintf(sstr, "fsg: %u, rsg: %u", sg_adc, sg_rear);
 	//UG_PutString(5, 250, sstr);
@@ -1076,7 +1019,17 @@ void MainEntry(void *argument)
 
 	Xsens_Update(&huart4);
 
+	// TODO: make it only transmit on value change
+	// can_tx_knobs(&hcan1);
+
 	switch (state) {
+		case LV_LOCK:
+			run_calibration();
+
+			if (!is_switch_on(HV_SWITCH) && !is_switch_on(DRIVE_SWITCH)) {
+			  change_state(LV);
+			}
+			break;
 		case LV:
 			run_calibration();
 
@@ -1113,6 +1066,18 @@ void MainEntry(void *argument)
 				break;
 			}
 
+			break;
+		case HV_LOCK:
+			if (!is_switch_on(HV_SWITCH)) {
+				// Driver flipped off HV switch
+				change_state(LV);
+				break;
+			}
+
+			if(!is_switch_on(DRIVE_SWITCH)){
+				// wait until drive is low to switch into true HV
+				change_state(HV_ENABLED);
+			}
 			break;
 		case HV_ENABLED:
 			// driver turned off HV
@@ -1231,8 +1196,8 @@ void MainEntry(void *argument)
 		break;
 	  }
 
-	//HAL_GPIO_TogglePin(HEARTBEAT_GPIO_Port, HEARTBEAT_Pin);
-	osDelay(10);
+	HAL_GPIO_TogglePin(HEARTBEAT_GPIO_Port, HEARTBEAT_Pin);
+//	osDelay(10);
   }
 
   // In case we accidentally leave the infinite loop

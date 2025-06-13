@@ -6,11 +6,15 @@
 /************ States ************/
 
 typedef enum {
+	// main states
     LV,
     PRECHARGING,
     HV_ENABLED,
     DRIVE,
-    FAULT
+    FAULT,
+	// states preventing switches starting in wrong position
+	LV_LOCK,
+	HV_LOCK
 } state_t;
 
 typedef enum {

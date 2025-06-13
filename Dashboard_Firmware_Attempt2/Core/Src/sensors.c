@@ -15,6 +15,7 @@ CALIBRATED_SENSOR_t throttle1;
 CALIBRATED_SENSOR_t throttle2;
 CALIBRATED_SENSOR_t brake;
 uint32_t torque_percentage = 0;
+uint32_t launch_control_param = 0;
 uint32_t torque_req = 0;
 
 #define RADS_PER_RPM 0.10472
@@ -22,6 +23,9 @@ uint32_t torque_req = 0;
 
 extern volatile uint8_t traction_control_enabled;
 extern volatile int16_t motor_speed;
+extern volatile uint16_t acc_current_adc;
+extern volatile uint16_t acc_current_ref_adc;
+extern volatile uint16_t pack_voltage;
 
 uint16_t get_max_torque(uint32_t max_power);
 uint32_t get_max_power();
@@ -128,13 +132,32 @@ void run_calibration() {
 }
 
 void update_sensor_vals(ADC_HandleTypeDef *hadc1, ADC_HandleTypeDef *hadc3) {
+	// pedals
     throttle1.raw = get_adc_conversion(hadc1, APPS1);
     update_percent(&throttle1);
     throttle2.raw = get_adc_conversion(hadc3, APPS2);
     update_percent(&throttle2);
     brake.raw = get_adc_conversion(hadc3, BSE);
     update_percent(&brake);
+
+    // knobs
     torque_percentage = get_adc_conversion(hadc1, KNOB2) * 100 / 4095;
+    launch_control_param = get_adc_conversion(hadc1, KNOB1) * 100 / 4095;
+}
+
+static float raw_to_mvolts(uint16_t adc_raw) {
+    return ((float)adc_raw / 4095) * 3.3 * 1000;
+}
+
+static float mvolts_to_amps(float mVolts, float mVolt_ref) {
+    return ((mVolts - mVolt_ref) * 7.4 / 4.7) / 6.667;
+}
+
+static bool accumulator_power_draw_exceeded() {
+	float acc_current_amps = mvolts_to_amps(raw_to_mvolts(acc_current_adc), raw_to_mvolts(acc_current_ref_adc));
+	float acc_voltage_volt = pack_voltage * 0.018 + 180;
+
+	return acc_current_amps*acc_voltage_volt >= MAX_POWER_ACCUMULATOR_W;
 }
 
 uint16_t requested_throttle(){
@@ -142,15 +165,20 @@ uint16_t requested_throttle(){
     uint16_t max_torque = get_max_torque(max_power);
 
     // zero throttle if brake is pressed at all, prevents hardware bspd
-	if (brake.percent >= BRAKE_BSPD_THRESHOLD) return 0;
+//	if (brake.percent >= BRAKE_BSPD_THRESHOLD) return 0;
 
-    torque_req = (throttle2.percent * max_torque * 10) / 100;  //upscale for MC code, Nm times 10
+
+    // MAKE EXTRA SURE 80kW accumulator power draw is not exceeded or FUSE WILL BLOW
+	if (accumulator_power_draw_exceeded()) {// if exceed power limit of 80kW, cut torque
+	   return 0;
+	}
+
+    torque_req = (throttle1.percent * max_torque * 10) / 100;  //upscale for MC code, Nm times 10
 
     // use reduced values from TC if TC torque request is lower
     if(is_button_enabled(TC_BUTTON) && (torque_req > TC_torque_req)){
 		torque_req = TC_torque_req;
 	}
-
 
     return (uint16_t)torque_req;
 }
@@ -159,9 +187,9 @@ uint16_t requested_throttle(){
 // attenuate for BMS temps between 50 and 60
 uint32_t get_max_power(){
 	if(PACK_TEMP < 50) {
-		return MAX_POWER_W;
+		return MAX_POWER_MOTOR_W;
 	} else if(PACK_TEMP < 58) {
-		return (58 - PACK_TEMP)*(MAX_POWER_W / 8);
+		return (58 - PACK_TEMP)*(MAX_POWER_MOTOR_W / 8);
 	} else {
 		return 0;
 	}
@@ -169,26 +197,28 @@ uint32_t get_max_power(){
 
 uint16_t get_max_torque(uint32_t max_power){
 	float motor_speed_rads = (float)motor_speed * RADS_PER_RPM;
-	float max_torque_power = max_power / motor_speed_rads;
+	float max_torque_power = max_power / motor_speed_rads; // max torque calculated from max power
 	float max_torque_knob = MAX_TORQUE_NM * (float)torque_percentage / 100;
 
-	// return the lower of the torque limit set by the knob and by the power limit
-	if (max_torque_knob > max_torque_power) {
-		return (uint16_t)max_torque_power;
-	}
-	else if (is_button_enabled(OVERTAKE_BUTTON)) {
+	// if overtake is enabled, return the lower of torque limit set by overtake value and power limit
+	if (is_button_enabled(OVERTAKE_BUTTON) && MAX_TORQUE_OVERTAKE < max_torque_power) {
 		return MAX_TORQUE_OVERTAKE;
 	}
+	// else return the lower of the torque limit set by the knob and by the power limit
 	else {
-		return (uint16_t)max_torque_knob;
+		if (max_torque_knob < max_torque_power) {
+			return (uint16_t)max_torque_knob;
+		}
+		else {
+			return (uint16_t)max_torque_power;
+		}
 	}
 }
 
 bool sensors_calibrated(){
-    if(throttle2.range < APPS1_MIN_RANGE) return 0;
-    if(brake.range < BRAKE_MIN_RANGE) return 0;
-
-    return 1;
+	return throttle1.range > APPS1_MIN_RANGE &&
+		   throttle2.range > APPS2_MIN_RANGE &&
+		   brake.range > BRAKE_MIN_RANGE;
 }
 
 bool braking(){
@@ -208,23 +238,23 @@ bool has_discrepancy() {
     return (throttle1.raw < APPS_OPEN_THRESH)
         || (throttle1.raw > APPS_SHORT_THRESH)
         || (throttle2.raw < APPS_OPEN_THRESH)
-        || (throttle2.raw > APPS_SHORT_THRESH);   //wiring fault
+        || (throttle2.raw > APPS_SHORT_THRESH);   // checks for wiring fault (open or short circuit).
+    											  // not sure why this is in the discrepancy check function but it's needed
 	return false;
 
 }
 
-// check for soft BSPD
-// see EV.4.7 of FSAE 2024 rulebook
+// check for soft BSPD (in rules, called "APPS / Brake Pedal Plausibility Check")
+// see EV.4.7 of FSAE 2025 rulebook
 bool is_brake_implausible() {
     if (error == BRAKE_IMPLAUSIBLE) {
         // once brake implausibility detected,
         // can only revert to normal if throttle "unapplied"
-        return !(throttle2.percent <= APPS1_BSPD_RESET_THRESHOLD);
+        return !(throttle1.percent <= APPS1_BSPD_RESET_THRESHOLD);
     }
 
-    // if both brake and throttle applied, brake implausible
-    //return (temp_brake > 0 && temp_throttle > throttle_range * 0.25);
-    return (brake.percent >= BRAKE_BSPD_THRESHOLD && throttle2.percent > APPS1_BSPD_THRESHOLD);
+    // if brake applied and throttle > 25%, brake implausible
+    return (brake.percent >= BRAKE_BSPD_THRESHOLD && throttle1.percent > APPS1_BSPD_THRESHOLD);
 }
 
 void update_percent(CALIBRATED_SENSOR_t* sensor){
